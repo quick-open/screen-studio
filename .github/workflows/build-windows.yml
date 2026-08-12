@@ -26,8 +26,10 @@ jobs:
           pyinstaller --onefile --windowed --name ScreenStudio
           --icon screen-studio.ico
           --version-file packaging/version.txt
+          --hidden-import screenkit.__main__
           --add-data "screen-studio.ico;."
           --collect-all mss
+          --collect-all customtkinter
           --collect-submodules PIL
           screen_studio_app.py
       - name: Stage installer inputs
@@ -50,4 +52,10 @@ jobs:
           path: |
             dist/ScreenStudio.exe
             packaging/dist/ScreenStudio-Setup.exe
+          if-no-files-found: error
+      - name: Upload staging (for signed repack)
+        uses: actions/upload-artifact@v4
+        with:
+          name: screen-studio-staging
+          path: packaging/staging
           if-no-files-found: error

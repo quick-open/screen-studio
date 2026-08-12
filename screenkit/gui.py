@@ -1,22 +1,25 @@
 #!/usr/bin/env python3
-r"""Screen Studio -- a pure-stdlib tkinter GUI on top of the ``screenkit`` API.
+r"""Screen Studio -- an Aura (QuickOpen design system) GUI on top of ``screenkit``.
 
-A single main window: a left sidebar of sections (Capture, Editor, Record,
-Recent) and a main panel that swaps to the selected section.  Every operation
-calls the tested core library (capture / annotate / ffmpeg) and long-running
-work (ffmpeg recording) runs on a background thread so the UI stays responsive;
-results are reported in a clear inline bar -- a path plus "Open folder" on
-success, or the :class:`ScreenKitError` message (never a traceback) on failure.
+A single Aura window: a sidebar of sections (Capture, Annotate, Record,
+Recent, About) and a swappable main panel.  Every operation calls the tested
+core library (capture / annotate / ffmpeg) and long-running work (ffmpeg
+recording) runs on a background thread so the UI stays responsive; results are
+reported in the Aura status bar -- a path plus "Open folder" on success, or the
+:class:`ScreenKitError` message (never a traceback) on failure.
 
 Design goals baked in here (mirrors the QuickOpen house style):
-  * pure standard-library tkinter/ttk -- NO third-party GUI deps.  Dark mode is
-    a ttk-style + palette swap.  Region selection is a fullscreen translucent
-    overlay you drag a rectangle on.
-  * Importing this module does nothing.  Only :func:`main` builds a root window,
-    and it degrades gracefully (prints a message, returns 0) with no display.
+  * built on the vendored ``screenkit/aura.py`` design system, which layers the
+    quickopen.ai look (deep space + light) over CustomTkinter.  Runtime deps:
+    ``customtkinter`` (+ ``darkdetect``) — declared in requirements.txt; the
+    PyInstaller build adds ``--collect-all customtkinter``.
+  * Importing this module does nothing.  Only :func:`main` builds a root
+    window, and it degrades gracefully (prints a message, returns 0) with no
+    display or with customtkinter missing.
   * Frozen-exe safe: bundled assets (icon, ffmpeg) are resolved via
     ``sys._MEIPASS`` / the exe directory when ``sys.frozen`` is set.
-  * If ffmpeg is missing, a banner says so but capture + annotation still work.
+  * If ffmpeg is missing, the Record section says so but capture + annotation
+    still work; on a headless box the panels still build with a friendly note.
 
 100% AI-built, open source, published on QuickOpen (quickopen.ai).
 """
@@ -27,52 +30,31 @@ import os
 import sys
 import threading
 
-# tkinter is imported lazily inside main()/build_app so importing this module
-# never fails on a headless CI box.
+# tkinter/customtkinter are imported lazily inside main()/build_app so merely
+# importing this module (e.g. during packaging or on a headless CI box) never
+# fails.
 
 APP_NAME = "Screen Studio"
 APP_VERSION = "1.0.0"
 WINDOW_TITLE = "Screen Studio — by QuickOpen (quickopen.ai)"
 PROJECT_URL = "https://quickopen.ai/projects/screen-studio"
+ACCENT = "#5b86f7"      # publish/specs/screen-studio.json accent
 
 IMAGE_TYPES = [
     ("Images", "*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.gif *.webp"),
     ("All files", "*.*"),
 ]
 
-# (section_id, label) -- id maps to a _panel_<id> method.
-SECTIONS = [
-    ("capture", "Capture"),
-    ("editor", "Editor"),
-    ("record", "Record"),
-    ("recent", "Recent"),
-]
-
 SECTION_DESCRIPTIONS = {
     "capture": "Grab the full screen, a monitor, or a dragged region. "
-               "The shot opens in the Editor.",
-    "editor": "Annotate the captured image — arrow, box, ellipse, line, text, "
-              "highlight, blur, crop and numbered steps — then Save or Copy.",
-    "record": "Record the screen (full or a region) to MP4 or GIF with a chosen "
-              "frame-rate. Live recording needs ffmpeg and runs on Windows.",
+               "The shot opens in Annotate.",
+    "annotate": "Annotate the captured image — arrow, box, ellipse, line, "
+                "text, highlight, blur, crop and numbered steps — then Save "
+                "or Copy.",
+    "record": "Record the screen (full or a region) to MP4 or GIF with a "
+              "chosen frame-rate. Live recording needs ffmpeg and runs on "
+              "Windows.",
     "recent": "Files you have saved in this app.",
-}
-
-PALETTES = {
-    "light": {
-        "bg": "#f5f7fa", "surface": "#ffffff", "text": "#141820",
-        "muted": "#5b6472", "primary": "#2f5fe0", "primary_hi": "#2450c8",
-        "entry": "#ffffff", "border": "#d5dae2", "sel": "#2f5fe0",
-        "sel_fg": "#ffffff", "trough": "#e2e7ef", "ok": "#1f7a3d",
-        "err": "#c0392b", "warn": "#b06b00", "canvas": "#e9edf3",
-    },
-    "dark": {
-        "bg": "#0f1115", "surface": "#1a1e24", "text": "#f1f3f7",
-        "muted": "#9aa4b2", "primary": "#5b86f7", "primary_hi": "#7098ff",
-        "entry": "#1a1e24", "border": "#2a2f38", "sel": "#5b86f7",
-        "sel_fg": "#0f1115", "trough": "#2a2f38", "ok": "#5bd68a",
-        "err": "#ff6b5e", "warn": "#f0b64a", "canvas": "#12151a",
-    },
 }
 
 
@@ -131,47 +113,53 @@ def open_with_default_app(path):
 
 
 # ---------------------------------------------------------------------------
-# The app (built lazily; tkinter imported only inside build_app/main)
+# The app (built lazily; tkinter/customtkinter imported only inside build_app)
 # ---------------------------------------------------------------------------
 def build_app():
-    """Construct and return the App class bound to a live tkinter import."""
+    """Construct and return the App class bound to live GUI imports.
+
+    Kept inside a function so this module imports cleanly without a display
+    (and without customtkinter installed).
+    """
     import tkinter as tk
-    from tkinter import ttk, filedialog
+    from tkinter import filedialog, ttk
+    import customtkinter as ctk
 
     from PIL import Image, ImageTk
 
     from . import annotate as ann
+    from . import aura
     from . import capture as cap
     from . import ffmpeg as ff
     from . import guiconfig
     from .errors import ScreenKitError
 
-    FONT = "Segoe UI"
-
-    # editor tools: (id, label)
+    # annotate tools shown in the segmented control: (id, label)
     EDITOR_TOOLS = [
-        ("arrow", "➤ Arrow"), ("rect", "▭ Box"), ("ellipse", "◯ Ellipse"),
-        ("line", "／ Line"), ("text", "T Text"), ("highlight", "▤ Highlight"),
-        ("blur", "░ Blur"), ("crop", "⌗ Crop"), ("number", "① Number"),
+        ("arrow", "Arrow"), ("rect", "Box"), ("ellipse", "Ellipse"),
+        ("line", "Line"), ("text", "Text"), ("highlight", "Highlight"),
+        ("blur", "Blur"), ("crop", "Crop"), ("number", "Step"),
     ]
+    TOOL_BY_LABEL = {label: tid for tid, label in EDITOR_TOOLS}
+    LABEL_BY_TOOL = {tid: label for tid, label in EDITOR_TOOLS}
+    DANGER = (aura.TOKENS["light"]["danger"], aura.TOKENS["dark"]["danger"])
 
-    class App(tk.Tk):
+    class App(aura.AuraApp):
         def __init__(self):
-            super().__init__()
-            self.title(WINDOW_TITLE)
-            self.geometry("1120x720")
-            self.minsize(920, 600)
+            super().__init__(
+                title=WINDOW_TITLE, app_name=APP_NAME, accent=ACCENT,
+                theme=guiconfig.get_theme(),
+                icon_png=asset_path("screen-studio.png"), version=APP_VERSION,
+                tagline="offline capture",
+                on_theme_change=guiconfig.set_theme,
+                size=(1120, 720), min_size=(920, 600))
 
-            self.theme = guiconfig.get_theme()
             self._busy = False
-            self._panels = {}
-            self._current = None
-            self._tracked = []
-            self._img_refs = []
+            self._img_refs_gui = []       # NOT _img_refs (owned by AuraApp)
             self._history = []
             self._last_output_dir = None
 
-            # editor state
+            # annotate state
             self._edit_image = None       # base PIL image (annotated in place)
             self._edit_undo = []          # stack of prior PIL images
             self._canvas_photo = None
@@ -187,16 +175,27 @@ def build_app():
 
             self._set_icon()
             self._build_menu()
-            self._build_layout()
-            self._apply_theme()
+
+            # "Open folder" lives in the Aura status bar's action host and is
+            # packed only when a success carries an output path.
+            self._openfolder_btn = aura.AuraButton(
+                self.statusbar.actions, "Open folder", kind="secondary",
+                height=30, command=self._open_last_folder)
+
+            self.add_section("capture", "Capture", "⊞", self._build_capture)
+            self.add_section("annotate", "Annotate", "✎", self._build_annotate)
+            self.add_section("record", "Record", "◉", self._build_record)
+            self.add_section("recent", "Recent", "◷", self._build_recent)
+            self.add_section("about", "About", "ℹ", self._build_about)
+            self.show("capture")
+            self.set_status("Ready")
             self.protocol("WM_DELETE_WINDOW", self._on_close)
-            self.after(50, self._select_first)
 
         # ---- assets / icon
         def _set_icon(self):
             try:
                 ico = asset_path("screen-studio.ico")
-                if ico:
+                if ico and os.name == "nt":
                     self.iconbitmap(ico)
                     return
             except Exception:
@@ -205,125 +204,23 @@ def build_app():
                 png = asset_path("screen-studio.png")
                 if png:
                     img = tk.PhotoImage(file=png)
-                    self._img_refs.append(img)
+                    self._img_refs_gui.append(img)
                     self.iconphoto(True, img)
             except Exception:
                 pass  # icon is cosmetic
 
-        # ---- theming
-        def track(self, widget, role):
-            self._tracked.append((widget, role))
-
-        def _pal(self):
-            return PALETTES[self.theme]
-
-        def _apply_theme(self):
-            p = self._pal()
-            style = ttk.Style(self)
-            try:
-                style.theme_use("clam")
-            except Exception:
-                pass
-            self.configure(bg=p["bg"])
-            style.configure(".", background=p["bg"], foreground=p["text"],
-                            fieldbackground=p["entry"], bordercolor=p["border"],
-                            font=(FONT, 10))
-            style.configure("TFrame", background=p["bg"])
-            style.configure("Sidebar.TFrame", background=p["surface"])
-            style.configure("Card.TFrame", background=p["surface"])
-            style.configure("TLabel", background=p["bg"], foreground=p["text"])
-            style.configure("Muted.TLabel", background=p["bg"], foreground=p["muted"])
-            style.configure("Header.TLabel", background=p["bg"], foreground=p["text"],
-                            font=(FONT, 15, "bold"))
-            style.configure("Sub.TLabel", background=p["bg"], foreground=p["muted"],
-                            font=(FONT, 10))
-            style.configure("Brand.TLabel", background=p["surface"],
-                            foreground=p["text"], font=(FONT, 12, "bold"))
-            style.configure("Ok.TLabel", background=p["bg"], foreground=p["ok"])
-            style.configure("Err.TLabel", background=p["bg"], foreground=p["err"])
-            style.configure("Warn.TLabel", background=p["surface"], foreground=p["warn"])
-            style.configure("Status.TLabel", background=p["surface"],
-                            foreground=p["muted"])
-            style.configure("Banner.TLabel", background=p["surface"],
-                            foreground=p["warn"], font=(FONT, 10, "bold"))
-            style.configure("TButton", background=p["surface"], foreground=p["text"],
-                            bordercolor=p["border"], focuscolor=p["surface"],
-                            padding=(10, 5))
-            style.map("TButton",
-                      background=[("active", p["trough"]), ("disabled", p["bg"])],
-                      foreground=[("disabled", p["muted"])])
-            style.configure("Accent.TButton", background=p["primary"],
-                            foreground="#ffffff", padding=(12, 6))
-            style.map("Accent.TButton",
-                      background=[("active", p["primary_hi"]),
-                                  ("disabled", p["border"])],
-                      foreground=[("disabled", p["muted"])])
-            style.configure("Tool.TButton", background=p["surface"],
-                            foreground=p["text"], padding=(8, 6))
-            style.map("Tool.TButton", background=[("active", p["trough"])])
-            style.configure("ToolActive.TButton", background=p["primary"],
-                            foreground="#ffffff", padding=(8, 6))
-            style.configure("Toggle.TButton", background=p["surface"],
-                            foreground=p["text"], padding=(8, 4))
-            style.configure("Nav.TButton", background=p["surface"],
-                            foreground=p["text"], padding=(12, 10), anchor="w",
-                            font=(FONT, 11))
-            style.map("Nav.TButton", background=[("active", p["trough"])])
-            style.configure("NavActive.TButton", background=p["primary"],
-                            foreground="#ffffff", padding=(12, 10), anchor="w",
-                            font=(FONT, 11, "bold"))
-            for name in ("TEntry", "TSpinbox"):
-                style.configure(name, fieldbackground=p["entry"], foreground=p["text"],
-                                insertcolor=p["text"], bordercolor=p["border"])
-            style.configure("TCombobox", fieldbackground=p["entry"],
-                            foreground=p["text"], background=p["surface"],
-                            arrowcolor=p["text"])
-            style.map("TCombobox", fieldbackground=[("readonly", p["entry"])],
-                      foreground=[("readonly", p["text"])])
-            style.configure("TRadiobutton", background=p["bg"], foreground=p["text"])
-            style.map("TRadiobutton", background=[("active", p["bg"])])
-            style.configure("TCheckbutton", background=p["bg"], foreground=p["text"])
-            style.map("TCheckbutton", background=[("active", p["bg"])])
-            style.configure("TLabelframe", background=p["bg"], foreground=p["text"],
-                            bordercolor=p["border"])
-            style.configure("TLabelframe.Label", background=p["bg"],
-                            foreground=p["muted"])
-            style.configure("TScale", background=p["bg"], troughcolor=p["trough"])
-            style.configure("Horizontal.TScale", background=p["bg"],
-                            troughcolor=p["trough"])
-            style.configure("TScrollbar", background=p["surface"],
-                            troughcolor=p["bg"], bordercolor=p["border"],
-                            arrowcolor=p["text"])
-            style.configure("TSeparator", background=p["border"])
-
-            for widget, role in list(self._tracked):
-                try:
-                    if role == "listbox":
-                        widget.configure(bg=p["surface"], fg=p["text"],
-                                         selectbackground=p["primary"],
-                                         selectforeground=p["sel_fg"],
-                                         highlightthickness=1,
-                                         highlightbackground=p["border"],
-                                         borderwidth=0)
-                    elif role == "canvas":
-                        widget.configure(bg=p["canvas"], highlightthickness=1,
-                                         highlightbackground=p["border"])
-                except Exception:
-                    pass
-            # re-style active nav buttons + banner
-            self._refresh_nav_styles()
-            if hasattr(self, "_banner"):
-                self._update_ffmpeg_banner()
-
-        def toggle_theme(self):
-            self.theme = "dark" if self.theme == "light" else "light"
-            guiconfig.set_theme(self.theme)
-            self._apply_theme()
-            self._theme_btn.configure(
-                text="☀ Light mode" if self.theme == "dark" else "🌙 Dark mode")
+        # ---- theming: raw canvas text must be re-tinted on theme flip
+        def set_theme(self, theme):
+            super().set_theme(theme)
             self._redraw_canvas()
 
-        # ---- menu
+        # ---- section switching (recent list refreshes on show)
+        def show(self, sid):
+            super().show(sid)
+            if sid == "recent":
+                self._reload_recent()
+
+        # ---- menu (native menus stay; theme lives in the sidebar toggle too)
         def _build_menu(self):
             bar = tk.Menu(self)
             filem = tk.Menu(bar, tearoff=0)
@@ -336,11 +233,14 @@ def build_app():
             bar.add_cascade(label="File", menu=filem)
 
             viewm = tk.Menu(bar, tearoff=0)
-            viewm.add_command(label="Toggle dark mode", command=self.toggle_theme)
+            viewm.add_command(
+                label="Toggle dark mode",
+                command=lambda: self.set_theme(
+                    "light" if self.theme == "dark" else "dark"))
             bar.add_cascade(label="View", menu=viewm)
 
             helpm = tk.Menu(bar, tearoff=0)
-            helpm.add_command(label="About", command=self._about)
+            helpm.add_command(label="About", command=lambda: self.show("about"))
             helpm.add_command(label="Project page (quickopen.ai)",
                               command=lambda: open_with_default_app(PROJECT_URL))
             bar.add_cascade(label="Help", menu=helpm)
@@ -348,116 +248,10 @@ def build_app():
             self.bind_all("<Control-o>", lambda e: self._open_image())
             self.bind_all("<Control-s>", lambda e: self._save_edit())
 
-        # ---- layout
-        def _build_layout(self):
-            top = ttk.Frame(self, style="Sidebar.TFrame", padding=(12, 8))
-            top.pack(fill="x", side="top")
-            ttk.Label(top, text="Screen Studio", style="Brand.TLabel").pack(side="left")
-            ttk.Label(top, style="Status.TLabel",
-                      text="  offline · open source · by QuickOpen").pack(side="left")
-            self._theme_btn = ttk.Button(
-                top, style="Toggle.TButton", command=self.toggle_theme,
-                text="☀ Light mode" if self.theme == "dark" else "🌙 Dark mode")
-            self._theme_btn.pack(side="right")
-
-            # ffmpeg-missing banner (only shown when ffmpeg not found)
-            self._banner = ttk.Label(self, style="Banner.TLabel",
-                                     anchor="w", padding=(12, 4))
-
-            body = ttk.Frame(self, style="TFrame")
-            body.pack(fill="both", expand=True)
-
-            side = ttk.Frame(body, style="Sidebar.TFrame", width=190)
-            side.pack(side="left", fill="y")
-            side.pack_propagate(False)
-            self._nav_btns = {}
-            for sid, label in SECTIONS:
-                b = ttk.Button(side, text="  " + label, style="Nav.TButton",
-                               command=lambda s=sid: self._show_section(s))
-                b.pack(fill="x", padx=6, pady=(6, 0))
-                self._nav_btns[sid] = b
-
-            main = ttk.Frame(body, style="TFrame", padding=(16, 12))
-            main.pack(side="left", fill="both", expand=True)
-
-            head = ttk.Frame(main, style="TFrame")
-            head.pack(fill="x")
-            self.title_lbl = ttk.Label(head, text="Capture", style="Header.TLabel")
-            self.title_lbl.pack(anchor="w")
-            self.desc_lbl = ttk.Label(head, text="", style="Sub.TLabel",
-                                      wraplength=760, justify="left")
-            self.desc_lbl.pack(anchor="w", pady=(2, 8))
-            ttk.Separator(main).pack(fill="x")
-
-            self.container = ttk.Frame(main, style="TFrame")
-            self.container.pack(fill="both", expand=True, pady=(10, 8))
-
-            bar = ttk.Frame(self, style="Sidebar.TFrame", padding=(12, 6))
-            bar.pack(fill="x", side="bottom")
-            self.status_lbl = ttk.Label(bar, text="Ready", style="Status.TLabel",
-                                        width=14, anchor="w")
-            self.status_lbl.pack(side="left")
-            self.openfolder_btn = ttk.Button(bar, text="Open folder",
-                                             command=self._open_last_folder)
-            self.result_lbl = ttk.Label(bar, text="", style="Status.TLabel",
-                                        anchor="w", wraplength=720, justify="left")
-            self.result_lbl.pack(side="left", fill="x", expand=True, padx=8)
-
-            self._update_ffmpeg_banner()
-
-        def _update_ffmpeg_banner(self):
-            self._ffmpeg = ff.find_ffmpeg()
-            if self._ffmpeg:
-                self._banner.pack_forget()
-            else:
-                self._banner.configure(
-                    text="⚠ FFmpeg not found — screen recording is disabled. "
-                         "Capture and annotation still work. Put ffmpeg beside "
-                         "the app or on your PATH to enable recording.")
-                self._banner.pack(fill="x", side="top", after=self.children_top())
-
-        def children_top(self):
-            # the top brand bar is the first packed child; banner sits under it
-            return self.pack_slaves()[0]
-
-        def _refresh_nav_styles(self):
-            if not hasattr(self, "_nav_btns"):
-                return
-            for sid, btn in self._nav_btns.items():
-                active = (self._current == sid)
-                btn.configure(style="NavActive.TButton" if active else "Nav.TButton")
-
-        def _select_first(self):
-            self._show_section("capture")
-
-        def _show_section(self, sid):
-            if self._current is not None and self._current in self._panels:
-                self._panels[self._current].pack_forget()
-            panel = self._panels.get(sid)
-            if panel is None:
-                panel = ttk.Frame(self.container, style="TFrame")
-                builder = getattr(self, "_panel_" + sid, None)
-                if builder:
-                    builder(panel)
-                else:
-                    ttk.Label(panel, text="Not implemented.").pack()
-                self._panels[sid] = panel
-                self._apply_theme()
-            panel.pack(fill="both", expand=True)
-            self._current = sid
-            self.title_lbl.configure(
-                text=dict(SECTIONS).get(sid, sid))
-            self.desc_lbl.configure(text=SECTION_DESCRIPTIONS.get(sid, ""))
-            self._refresh_nav_styles()
-            self._clear_result()
-            if sid == "recent":
-                self._reload_recent()
-
-        # ---- background op runner
+        # ---- background op runner (threading + self.after marshalling)
         def _bg(self, work, on_ok, button=None, busy="Working…"):
             if self._busy:
-                self._set_status("busy")
-                self._show_error("Please wait — an operation is already running.")
+                self.set_error("Please wait — an operation is already running.")
                 return
             self._busy = True
             if button is not None:
@@ -465,8 +259,8 @@ def build_app():
                     button.state(["disabled"])
                 except Exception:
                     pass
-            self._set_status(busy, kind="working")
-            self._clear_result(keep_status=True)
+            self.set_status(busy, kind="working")
+            self._hide_openfolder()
 
             def run():
                 try:
@@ -485,34 +279,22 @@ def build_app():
                     except Exception:
                         pass
                 if err is not None:
-                    self._set_status("error", kind="err")
-                    self._show_error(err)
+                    self.set_error(err)
                     return
-                self._set_status("done", kind="ok")
+                self.set_status("Done", kind="ok")
                 try:
                     on_ok(res)
                 except Exception as ex:
-                    self._show_error(f"Post-processing error: {ex}")
+                    self.set_error(f"Post-processing error: {ex}")
 
             threading.Thread(target=run, daemon=True).start()
 
-        # ---- result bar helpers
-        def _set_status(self, text, kind="idle"):
-            p = self._pal()
-            color = {"working": p["primary"], "ok": p["ok"], "err": p["err"]}.get(
-                kind, p["muted"])
-            self.status_lbl.configure(text=text, foreground=color)
-
-        def _clear_result(self, keep_status=False):
-            self.result_lbl.configure(text="")
-            self.openfolder_btn.pack_forget()
-            if not keep_status:
-                self._set_status("Ready")
-
-        def _show_error(self, message):
-            self.result_lbl.configure(text="✕ " + message,
-                                      foreground=self._pal()["err"])
-            self.openfolder_btn.pack_forget()
+        # ---- status-bar helpers
+        def _hide_openfolder(self):
+            try:
+                self._openfolder_btn.pack_forget()
+            except Exception:
+                pass
 
         def report_success(self, message, outputs=None):
             outputs = outputs or []
@@ -525,10 +307,8 @@ def build_app():
                 self._last_output_dir = (
                     first if os.path.isdir(first)
                     else os.path.dirname(os.path.abspath(first)))
-                self.openfolder_btn.pack(side="right")
-            self.result_lbl.configure(text="✓ " + message,
-                                      foreground=self._pal()["ok"])
-            self._set_status("done", kind="ok")
+                self._openfolder_btn.pack(side="left")
+            self.set_success(message)
 
         def _open_last_folder(self):
             if self._last_output_dir:
@@ -537,37 +317,48 @@ def build_app():
         # =====================================================================
         # CAPTURE
         # =====================================================================
-        def _panel_capture(self, parent):
-            card = ttk.Frame(parent, style="TFrame")
-            card.pack(fill="x")
-            ttk.Label(card, text="Take a screenshot:", style="TLabel").pack(anchor="w")
+        def _build_capture(self, frame):
+            aura.Caption(frame, SECTION_DESCRIPTIONS["capture"],
+                         wraplength=760, justify="left").pack(
+                anchor="w", pady=(0, 12))
 
-            btns = ttk.Frame(parent, style="TFrame")
-            btns.pack(fill="x", pady=10)
-            ttk.Button(btns, text="🖥  Full screen", style="Accent.TButton",
-                       command=self._capture_full).pack(side="left")
-            ttk.Button(btns, text="🗔  Window (best-effort)",
-                       command=self._capture_window).pack(side="left", padx=6)
-            ttk.Button(btns, text="▭  Region…",
-                       command=self._capture_region).pack(side="left")
+            shot = aura.Card(frame, title="Take a screenshot")
+            shot.pack(fill="x")
+            btns = ctk.CTkFrame(shot.body, fg_color="transparent")
+            btns.pack(fill="x")
+            aura.AuraButton(btns, "Full screen",
+                            command=self._capture_full).pack(side="left")
+            aura.AuraButton(btns, "Window (best-effort)", kind="secondary",
+                            command=self._capture_window).pack(
+                side="left", padx=8)
+            aura.AuraButton(btns, "Region…", kind="secondary",
+                            command=self._capture_region).pack(side="left")
+            aura.Caption(shot.body,
+                         "Region opens a translucent full-screen overlay — "
+                         "drag a rectangle to grab it. Every capture opens "
+                         "in Annotate.", wraplength=720, justify="left").pack(
+                anchor="w", pady=(10, 0))
 
-            mon = ttk.Frame(parent, style="TFrame")
-            mon.pack(fill="x", pady=(4, 8))
-            ttk.Label(mon, text="Monitor", width=10, anchor="w").pack(side="left")
+            mon = aura.Card(frame, title="Capture one monitor")
+            mon.pack(fill="x", pady=(14, 0))
+            row = ctk.CTkFrame(mon.body, fg_color="transparent")
+            row.pack(fill="x")
+            ctk.CTkLabel(row, text="Monitor", font=aura.font(),
+                         width=70, anchor="w").pack(side="left")
             self._mon_var = tk.StringVar(value="all")
-            self._mon_combo = ttk.Combobox(mon, textvariable=self._mon_var,
-                                           state="readonly", width=28,
-                                           values=["all"])
+            self._mon_combo = aura.AuraCombo(row, variable=self._mon_var,
+                                             state="readonly", width=240,
+                                             values=["all"])
             self._mon_combo.pack(side="left")
-            ttk.Button(mon, text="Capture monitor",
-                       command=self._capture_monitor).pack(side="left", padx=6)
-            ttk.Button(mon, text="Refresh",
-                       command=self._reload_monitors).pack(side="left")
+            aura.AuraButton(row, "Capture monitor", kind="secondary",
+                            command=self._capture_monitor).pack(
+                side="left", padx=8)
+            aura.AuraButton(row, "Refresh", kind="ghost",
+                            command=self._reload_monitors).pack(side="left")
+            self._cap_note = aura.Caption(mon.body, "", wraplength=720,
+                                          justify="left")
+            self._cap_note.pack(anchor="w", pady=(10, 0))
 
-            ttk.Label(parent, style="Muted.TLabel", wraplength=740, justify="left",
-                      text="Region opens a translucent full-screen overlay — drag "
-                           "a rectangle to grab it. Every capture opens in the "
-                           "Editor for annotation.").pack(anchor="w", pady=(6, 0))
             self.after(80, self._reload_monitors)
 
         def _reload_monitors(self):
@@ -575,6 +366,10 @@ def build_app():
                 mons = cap.list_monitors()
             except ScreenKitError:
                 self._mon_combo.configure(values=["all"])
+                self._cap_note.configure(
+                    text="Screen capture is unavailable in this session "
+                         "(no display was found) — the buttons above need a "
+                         "desktop session.")
                 return
             vals = ["all"]
             for m in mons:
@@ -583,6 +378,10 @@ def build_app():
                 vals.append(f"{m['index']}: {m['width']}×{m['height']} "
                             f"@({m['left']},{m['top']})")
             self._mon_combo.configure(values=vals)
+            n = max(0, len(vals) - 1) or 1
+            self._cap_note.configure(
+                text=f"{n} monitor(s) detected. \"all\" grabs the combined "
+                     "virtual screen.")
 
         def _capture_full(self):
             self._bg(cap.capture_full,
@@ -611,76 +410,77 @@ def build_app():
             try:
                 RegionOverlay(self, on_done=self._region_selected)
             except ScreenKitError as ex:
-                self._show_error(str(ex))
+                self.set_error(str(ex))
             except Exception as ex:
-                self._show_error(f"Could not open the region overlay: {ex}")
+                self.set_error(f"Could not open the region overlay: {ex}")
 
         def _region_selected(self, region):
             if not region:
-                self._set_status("Ready")
+                self.set_status("Ready")
                 return
             x, y, w, h = region
             if w < 2 or h < 2:
-                self._show_error("Region too small — drag a larger rectangle.")
+                self.set_error("Region too small — drag a larger rectangle.")
                 return
             self._bg(lambda: cap.capture_region(x, y, w, h),
                      lambda img: self._open_in_editor(
                          img, f"Region {w}×{h} captured."))
 
         # =====================================================================
-        # EDITOR
+        # ANNOTATE
         # =====================================================================
-        def _panel_editor(self, parent):
-            toolbar = ttk.Frame(parent, style="TFrame")
-            toolbar.pack(fill="x")
+        def _build_annotate(self, frame):
             self._tool_var = tk.StringVar(value="arrow")
-            self._tool_btns = {}
-            for tid, label in EDITOR_TOOLS:
-                b = ttk.Button(toolbar, text=label, style="Tool.TButton",
-                               command=lambda t=tid: self._set_tool(t))
-                b.pack(side="left", padx=(0, 4), pady=2)
-                self._tool_btns[tid] = b
+            self._tool_seg = aura.SegmentedControl(
+                frame, values=[label for _tid, label in EDITOR_TOOLS],
+                dynamic_resizing=True,
+                command=lambda label: self._set_tool(
+                    TOOL_BY_LABEL.get(label, "arrow")))
+            self._tool_seg.pack(anchor="w")
 
-            opts = ttk.Frame(parent, style="TFrame")
-            opts.pack(fill="x", pady=(6, 4))
-            ttk.Label(opts, text="Colour", width=7, anchor="w").pack(side="left")
+            opts = ctk.CTkFrame(frame, fg_color="transparent")
+            opts.pack(fill="x", pady=(10, 4))
+            ctk.CTkLabel(opts, text="Colour", font=aura.font()).pack(side="left")
             self._color_var = tk.StringVar(value="#ff3b30")
-            self._color_combo = ttk.Combobox(
-                opts, textvariable=self._color_var, width=10, values=[
-                    "#ff3b30", "#ffcc00", "#34c759", "#0a84ff", "#af52de",
-                    "#ffffff", "#000000"])
-            self._color_combo.pack(side="left")
-            ttk.Label(opts, text="Width").pack(side="left", padx=(12, 4))
+            aura.AuraCombo(opts, variable=self._color_var, width=110, values=[
+                "#ff3b30", "#ffcc00", "#34c759", "#0a84ff", "#af52de",
+                "#ffffff", "#000000"]).pack(side="left", padx=(6, 0))
+            ctk.CTkLabel(opts, text="Width", font=aura.font()).pack(
+                side="left", padx=(14, 6))
             self._width_var = tk.StringVar(value="4")
             ttk.Spinbox(opts, from_=1, to=40, width=4,
                         textvariable=self._width_var).pack(side="left")
-            ttk.Label(opts, text="Text").pack(side="left", padx=(12, 4))
-            self._text_var = tk.StringVar(value="Label")
-            ttk.Entry(opts, textvariable=self._text_var, width=16).pack(side="left")
-            ttk.Label(opts, text="Size").pack(side="left", padx=(12, 4))
+            ctk.CTkLabel(opts, text="Text", font=aura.font()).pack(
+                side="left", padx=(14, 6))
+            self._text_entry = aura.AuraEntry(opts, placeholder="Label", width=150)
+            self._text_entry.pack(side="left")
+            ctk.CTkLabel(opts, text="Size", font=aura.font()).pack(
+                side="left", padx=(14, 6))
             self._tsize_var = tk.StringVar(value="24")
             ttk.Spinbox(opts, from_=8, to=200, width=4,
                         textvariable=self._tsize_var).pack(side="left")
-            ttk.Label(opts, text="Step #").pack(side="left", padx=(12, 4))
+            ctk.CTkLabel(opts, text="Step #", font=aura.font()).pack(
+                side="left", padx=(14, 6))
             self._num_var = tk.StringVar(value="1")
             ttk.Spinbox(opts, from_=1, to=999, width=4,
                         textvariable=self._num_var).pack(side="left")
 
-            actions = ttk.Frame(parent, style="TFrame")
-            actions.pack(fill="x", pady=(2, 6))
-            ttk.Button(actions, text="↶ Undo", command=self._undo).pack(side="left")
-            ttk.Button(actions, text="Open image…",
-                       command=self._open_image).pack(side="left", padx=6)
-            ttk.Button(actions, text="💾 Save…", style="Accent.TButton",
-                       command=self._save_edit).pack(side="left")
-            ttk.Button(actions, text="⧉ Copy",
-                       command=self._copy_edit).pack(side="left", padx=6)
+            actions = ctk.CTkFrame(frame, fg_color="transparent")
+            actions.pack(fill="x", pady=(4, 10))
+            aura.AuraButton(actions, "Undo", kind="secondary",
+                            command=self._undo).pack(side="left")
+            aura.AuraButton(actions, "Open image…", kind="secondary",
+                            command=self._open_image).pack(side="left", padx=8)
+            aura.AuraButton(actions, "Save…",
+                            command=self._save_edit).pack(side="left")
+            aura.AuraButton(actions, "Copy", kind="secondary",
+                            command=self._copy_edit).pack(side="left", padx=8)
 
-            body = ttk.Frame(parent, style="TFrame")
+            body = ctk.CTkFrame(frame, fg_color="transparent")
             body.pack(fill="both", expand=True)
-            self._canvas = tk.Canvas(body, highlightthickness=1, bd=0)
+            self._canvas = tk.Canvas(body, bd=0)
             self._canvas.pack(fill="both", expand=True)
-            self.track(self._canvas, "canvas")
+            aura.track(self._canvas, "canvas")
             self._canvas.bind("<Button-1>", self._on_canvas_press)
             self._canvas.bind("<B1-Motion>", self._on_canvas_drag)
             self._canvas.bind("<ButtonRelease-1>", self._on_canvas_release)
@@ -689,29 +489,36 @@ def build_app():
 
         def _set_tool(self, tid):
             self._tool_var.set(tid)
-            for t, b in getattr(self, "_tool_btns", {}).items():
-                b.configure(style="ToolActive.TButton" if t == tid
-                            else "Tool.TButton")
+            try:
+                self._tool_seg.set(LABEL_BY_TOOL.get(tid, "Arrow"))
+            except Exception:
+                pass
 
         def _open_in_editor(self, img, message):
             self._edit_image = img.convert("RGB")
             self._edit_undo = []
             self.report_success(message)
-            self._show_section("editor")
+            self.show("annotate")
             self._redraw_canvas()
 
         def _redraw_canvas(self):
             canvas = getattr(self, "_canvas", None)
             if canvas is None:
                 return
+            try:
+                if not canvas.winfo_exists():
+                    return
+            except Exception:
+                return
             canvas.delete("all")
             if self._edit_image is None:
                 canvas.create_text(
                     canvas.winfo_width() // 2 or 200,
                     canvas.winfo_height() // 2 or 120,
-                    text="No image yet — capture from the Capture tab\n"
+                    text="No image yet — capture from the Capture section\n"
                          "or open an image (Ctrl+O).",
-                    fill=self._pal()["muted"], justify="center", font=(FONT, 11))
+                    fill=aura.P("muted"), justify="center",
+                    font=aura.font(11))
                 return
             cw = max(50, canvas.winfo_width())
             ch = max(50, canvas.winfo_height())
@@ -798,8 +605,9 @@ def build_app():
                     new = ann.crop(img, box)
                 elif tool == "text":
                     size = int(self._tsize_var.get() or 24)
-                    new = ann.text(img, p0, self._text_var.get(), size=size,
-                                   color=col)
+                    new = ann.text(img, p0,
+                                   self._text_entry.get().strip() or "Label",
+                                   size=size, color=col)
                 elif tool == "number":
                     n = int(self._num_var.get() or 1)
                     new = ann.numbered_step(img, p0, n, color=col)
@@ -807,18 +615,18 @@ def build_app():
                 else:
                     return
             except ScreenKitError as ex:
-                self._show_error(str(ex))
+                self.set_error(str(ex))
                 return
             self._edit_undo.append(self._edit_image)
             self._edit_image = new
             self._redraw_canvas()
-            self._set_status("edited", kind="ok")
+            self.set_status("Edited", kind="ok")
 
         def _undo(self):
             if self._edit_undo:
                 self._edit_image = self._edit_undo.pop()
                 self._redraw_canvas()
-                self._set_status("undone", kind="ok")
+                self.set_status("Undone", kind="ok")
 
         def _open_image(self):
             path = filedialog.askopenfilename(title="Open image",
@@ -829,13 +637,14 @@ def build_app():
                 img = Image.open(path)
                 img.load()
             except Exception as ex:
-                self._show_error(f"Could not open image: {ex}")
+                self.set_error(f"Could not open image: {ex}")
                 return
             self._open_in_editor(img, f"Opened {os.path.basename(path)}.")
 
         def _save_edit(self):
             if self._edit_image is None:
-                self._show_error("Nothing to save yet — capture or open an image.")
+                self.set_error("Nothing to save yet — capture or open an "
+                               "image first.")
                 return
             path = filedialog.asksaveasfilename(
                 title="Save image", defaultextension=".png",
@@ -850,70 +659,85 @@ def build_app():
 
         def _copy_edit(self):
             if self._edit_image is None:
-                self._show_error("Nothing to copy yet.")
+                self.set_error("Nothing to copy yet — capture or open an "
+                               "image first.")
                 return
             ok = cap.to_clipboard(self._edit_image)
             if ok:
                 self.report_success("Copied to clipboard.")
             else:
-                self._show_error("Clipboard image copy is only available on "
-                                 "Windows. Use Save instead.")
+                self.set_error("Clipboard image copy is only available on "
+                               "Windows. Use Save instead.")
 
         # =====================================================================
         # RECORD
         # =====================================================================
-        def _panel_record(self, parent):
-            row = ttk.Frame(parent, style="TFrame")
-            row.pack(fill="x", pady=(2, 6))
-            ttk.Label(row, text="Area", width=8, anchor="w").pack(side="left")
-            self._rec_area = tk.StringVar(value="full")
-            ttk.Radiobutton(row, text="Full screen", value="full",
-                            variable=self._rec_area).pack(side="left")
-            ttk.Radiobutton(row, text="Region", value="region",
-                            variable=self._rec_area).pack(side="left", padx=6)
-            ttk.Button(row, text="Select region…",
-                       command=self._rec_select_region).pack(side="left")
-            self._rec_region_lbl = ttk.Label(row, style="Muted.TLabel", text="")
-            self._rec_region_lbl.pack(side="left", padx=8)
+        def _build_record(self, frame):
+            aura.Caption(frame, SECTION_DESCRIPTIONS["record"],
+                         wraplength=760, justify="left").pack(
+                anchor="w", pady=(0, 12))
 
-            row2 = ttk.Frame(parent, style="TFrame")
-            row2.pack(fill="x", pady=6)
-            ttk.Label(row2, text="FPS", width=8, anchor="w").pack(side="left")
+            card = aura.Card(frame, title="Screen recording")
+            card.pack(fill="x")
+
+            row = ctk.CTkFrame(card.body, fg_color="transparent")
+            row.pack(fill="x", pady=(0, 8))
+            ctk.CTkLabel(row, text="Area", font=aura.font(),
+                         width=60, anchor="w").pack(side="left")
+            self._rec_area = tk.StringVar(value="full")
+            ctk.CTkRadioButton(row, text="Full screen", value="full",
+                               variable=self._rec_area,
+                               font=aura.font()).pack(side="left")
+            ctk.CTkRadioButton(row, text="Region", value="region",
+                               variable=self._rec_area,
+                               font=aura.font()).pack(side="left", padx=8)
+            aura.AuraButton(row, "Select region…", kind="secondary",
+                            command=self._rec_select_region).pack(side="left")
+            self._rec_region_lbl = aura.Caption(row, "")
+            self._rec_region_lbl.pack(side="left", padx=10)
+
+            row2 = ctk.CTkFrame(card.body, fg_color="transparent")
+            row2.pack(fill="x", pady=(0, 10))
+            ctk.CTkLabel(row2, text="FPS", font=aura.font(),
+                         width=60, anchor="w").pack(side="left")
             self._fps_var = tk.StringVar(value="15")
             ttk.Spinbox(row2, from_=1, to=60, width=5,
                         textvariable=self._fps_var).pack(side="left")
-            ttk.Label(row2, text="Format").pack(side="left", padx=(16, 4))
+            ctk.CTkLabel(row2, text="Format", font=aura.font()).pack(
+                side="left", padx=(16, 6))
             self._fmt_var = tk.StringVar(value="MP4")
-            ttk.Combobox(row2, textvariable=self._fmt_var, state="readonly",
-                         width=6, values=["MP4", "GIF"]).pack(side="left")
+            aura.AuraCombo(row2, variable=self._fmt_var, state="readonly",
+                           width=90, values=["MP4", "GIF"]).pack(side="left")
 
-            row3 = ttk.Frame(parent, style="TFrame")
-            row3.pack(fill="x", pady=6)
-            self._rec_start_btn = ttk.Button(
-                row3, text="⏺ Start recording", style="Accent.TButton",
-                command=self._rec_start)
+            row3 = ctk.CTkFrame(card.body, fg_color="transparent")
+            row3.pack(fill="x")
+            self._rec_start_btn = aura.AuraButton(
+                row3, "● Start recording", command=self._rec_start)
             self._rec_start_btn.pack(side="left")
-            self._rec_stop_btn = ttk.Button(row3, text="⏹ Stop",
-                                            command=self._rec_stop)
-            self._rec_stop_btn.pack(side="left", padx=6)
+            self._rec_stop_btn = aura.AuraButton(
+                row3, "Stop", kind="danger", command=self._rec_stop)
+            self._rec_stop_btn.pack(side="left", padx=8)
             self._rec_stop_btn.state(["disabled"])
-            self._rec_elapsed = ttk.Label(row3, style="Header.TLabel", text="")
+            # live recording indicator: danger token, flips with the theme
+            self._rec_elapsed = ctk.CTkLabel(
+                row3, text="", font=aura.font(15, "bold"), text_color=DANGER)
             self._rec_elapsed.pack(side="left", padx=12)
 
-            note = ("Live recording shells out to FFmpeg (gdigrab on Windows). "
-                    "Stop finalises the file. On non-Windows desktops recording "
-                    "is best-effort (x11grab/avfoundation).")
+            note = ("Live recording shells out to FFmpeg (gdigrab on "
+                    "Windows). Stop finalises the file. On non-Windows "
+                    "desktops recording is best-effort "
+                    "(x11grab/avfoundation).")
             if not self._ffmpeg:
-                note = ("FFmpeg was not found, so recording is disabled here. "
-                        "Add ffmpeg to enable it. ") + note
-            ttk.Label(parent, style="Muted.TLabel", wraplength=740,
-                      justify="left", text=note).pack(anchor="w", pady=(8, 0))
+                note = ("FFmpeg was not found, so recording is disabled "
+                        "here. Add ffmpeg to enable it. ") + note
+            aura.Caption(card.body, note, wraplength=720,
+                         justify="left").pack(anchor="w", pady=(10, 0))
 
         def _rec_select_region(self):
             try:
                 RegionOverlay(self, on_done=self._rec_region_done)
             except Exception as ex:
-                self._show_error(f"Could not open the region overlay: {ex}")
+                self.set_error(f"Could not open the region overlay: {ex}")
 
         def _rec_region_done(self, region):
             if region and region[2] >= 2 and region[3] >= 2:
@@ -923,11 +747,12 @@ def build_app():
                     text=f"{region[2]}×{region[3]} @({region[0]},{region[1]})")
 
         def _rec_start(self):
+            self._ffmpeg = ff.find_ffmpeg()
             if not self._ffmpeg:
-                self._show_error("FFmpeg not found — recording is unavailable.")
+                self.set_error("FFmpeg not found — recording is unavailable.")
                 return
             if self._recorder is not None:
-                self._show_error("A recording is already in progress.")
+                self.set_error("A recording is already in progress.")
                 return
             gif = self._fmt_var.get() == "GIF"
             ext = ".gif" if gif else ".mp4"
@@ -939,29 +764,28 @@ def build_app():
             region = None
             if self._rec_area.get() == "region":
                 if not self._rec_region:
-                    self._show_error("Select a region first.")
+                    self.set_error("Select a region first.")
                     return
                 region = self._rec_region
             try:
                 fps = int(self._fps_var.get())
             except ValueError:
-                self._show_error("FPS must be a whole number.")
+                self.set_error("FPS must be a whole number.")
                 return
             rec = ff.Recorder(path, fps=fps, region=region, gif=gif)
 
             def do_start():
                 rec.start()
                 return rec
-            self._set_status("starting…", kind="working")
 
             def started(_r):
                 self._recorder = rec
                 self._rec_start_btn.state(["disabled"])
                 self._rec_stop_btn.state(["!disabled"])
-                self._set_status("recording", kind="working")
+                self.set_status("Recording…", kind="working")
                 self._tick_elapsed()
             self._bg(do_start, started, button=self._rec_start_btn,
-                     busy="starting…")
+                     busy="Starting…")
 
         def _tick_elapsed(self):
             if self._recorder is None:
@@ -979,7 +803,7 @@ def build_app():
             if self._rec_timer:
                 self.after_cancel(self._rec_timer)
                 self._rec_timer = None
-            self._set_status("finalising…", kind="working")
+            self.set_status("Finalising…", kind="working")
             self._rec_stop_btn.state(["disabled"])
 
             def do_stop():
@@ -990,38 +814,48 @@ def build_app():
                 self._rec_start_btn.state(["!disabled"])
                 self._rec_elapsed.configure(text="")
                 self.report_success(f"Saved recording → {path}", [path])
-            # run stop off-thread but keep _recorder set so tick stops cleanly
+            # run stop off-thread; clear _recorder now so the tick stops cleanly
             self._recorder = None
+            self._rec_elapsed.configure(text="")
             self._bg(do_stop, stopped)
 
         # =====================================================================
         # RECENT
         # =====================================================================
-        def _panel_recent(self, parent):
-            ttk.Label(parent, text="Recently saved files:",
-                      style="TLabel").pack(anchor="w")
-            box = ttk.Frame(parent, style="TFrame")
-            box.pack(fill="both", expand=True, pady=6)
-            self._recent_lb = tk.Listbox(box, activestyle="none")
+        def _build_recent(self, frame):
+            aura.Caption(frame, SECTION_DESCRIPTIONS["recent"],
+                         wraplength=760, justify="left").pack(
+                anchor="w", pady=(0, 12))
+
+            card = aura.Card(frame, title="Recently saved files")
+            card.pack(fill="both", expand=True)
+            box = ctk.CTkFrame(card.body, fg_color="transparent")
+            box.pack(fill="both", expand=True)
+            self._recent_lb = tk.Listbox(box, activestyle="none",
+                                         exportselection=False)
             sb = ttk.Scrollbar(box, orient="vertical",
                                command=self._recent_lb.yview)
             self._recent_lb.configure(yscrollcommand=sb.set)
             sb.pack(side="right", fill="y")
             self._recent_lb.pack(side="left", fill="both", expand=True)
-            self.track(self._recent_lb, "listbox")
+            aura.track(self._recent_lb, "listbox")
             self._recent_lb.bind("<Double-Button-1>",
                                  lambda e: self._recent_open(False))
 
-            btns = ttk.Frame(parent, style="TFrame")
-            btns.pack(fill="x")
-            ttk.Button(btns, text="Open",
-                       command=lambda: self._recent_open(False)).pack(side="left")
-            ttk.Button(btns, text="Open in editor",
-                       command=self._recent_edit).pack(side="left", padx=6)
-            ttk.Button(btns, text="Open folder",
-                       command=lambda: self._recent_open(True)).pack(side="left")
-            ttk.Button(btns, text="Clear list",
-                       command=self._recent_clear).pack(side="left", padx=6)
+            btns = ctk.CTkFrame(card.body, fg_color="transparent")
+            btns.pack(fill="x", pady=(10, 0))
+            aura.AuraButton(btns, "Open", kind="secondary",
+                            command=lambda: self._recent_open(False)).pack(
+                side="left")
+            aura.AuraButton(btns, "Open in Annotate", kind="secondary",
+                            command=self._recent_edit).pack(
+                side="left", padx=8)
+            aura.AuraButton(btns, "Open folder", kind="secondary",
+                            command=lambda: self._recent_open(True)).pack(
+                side="left")
+            aura.AuraButton(btns, "Clear list", kind="ghost",
+                            command=self._recent_clear).pack(
+                side="left", padx=8)
             self._reload_recent()
 
         def _reload_recent(self):
@@ -1047,20 +881,20 @@ def build_app():
         def _recent_open(self, reveal):
             path = self._recent_selected()
             if not path:
-                self._show_error("Select an existing file.")
+                self.set_error("Select an existing file first.")
                 return
             (open_in_file_manager if reveal else open_with_default_app)(path)
 
         def _recent_edit(self):
             path = self._recent_selected()
             if not path:
-                self._show_error("Select an existing image file.")
+                self.set_error("Select an existing image file first.")
                 return
             try:
                 img = Image.open(path)
                 img.load()
             except Exception as ex:
-                self._show_error(f"Not an editable image: {ex}")
+                self.set_error(f"Not an editable image: {ex}")
                 return
             self._open_in_editor(img, f"Opened {os.path.basename(path)}.")
 
@@ -1068,33 +902,32 @@ def build_app():
             guiconfig.clear_recent()
             self._reload_recent()
 
-        # ---- About
-        def _about(self):
-            win = tk.Toplevel(self)
-            win.title("About Screen Studio")
-            win.configure(bg=self._pal()["bg"])
-            win.resizable(False, False)
-            frm = ttk.Frame(win, style="TFrame", padding=18)
-            frm.pack(fill="both", expand=True)
-            ttk.Label(frm, text="Screen Studio", style="Header.TLabel").pack(anchor="w")
-            ttk.Label(frm, text=f"Version {APP_VERSION}",
-                      style="Sub.TLabel").pack(anchor="w", pady=(0, 8))
-            ttk.Label(frm, style="TLabel", justify="left", wraplength=380,
-                      text="A fast, fully-offline screenshot, annotation and "
-                           "screen-recording tool.\n\n100% AI-built, open source, "
-                           "published on QuickOpen. Nothing is uploaded "
-                           "anywhere.").pack(anchor="w")
-            ttk.Label(frm, style="Sub.TLabel", justify="left", wraplength=380,
-                      text="Apache-2.0. Built on mss and Pillow; screen "
-                           "recording uses an external FFmpeg (LGPL/GPL).").pack(
-                anchor="w", pady=(8, 4))
-            link = ttk.Label(frm, text="Project page: quickopen.ai",
-                             style="Ok.TLabel", cursor="hand2")
-            link.pack(anchor="w", pady=(4, 10))
-            link.bind("<Button-1>", lambda e: open_with_default_app(PROJECT_URL))
-            ttk.Button(frm, text="Close", command=win.destroy).pack(anchor="e")
-            win.transient(self)
-            win.grab_set()
+        # =====================================================================
+        # ABOUT
+        # =====================================================================
+        def _build_about(self, frame):
+            card = aura.Card(frame, title="About Screen Studio")
+            card.pack(fill="x")
+            aura.Heading(card.body, APP_NAME).pack(anchor="w")
+            aura.Caption(card.body, f"Version {APP_VERSION}").pack(
+                anchor="w", pady=(0, 10))
+            ctk.CTkLabel(
+                card.body, font=aura.font(), justify="left", anchor="w",
+                wraplength=520,
+                text="A fast, fully-offline screenshot, annotation and "
+                     "screen-recording tool.\n\n100% AI-built, open source, "
+                     "published on QuickOpen. Nothing is uploaded "
+                     "anywhere.").pack(anchor="w")
+            aura.Caption(
+                card.body,
+                "Licensed under Apache-2.0. Built on mss, Pillow and "
+                "CustomTkinter (MIT); screen recording uses an external "
+                "FFmpeg (LGPL/GPL).", wraplength=520,
+                justify="left").pack(anchor="w", pady=(10, 4))
+            aura.AuraButton(card.body, "Project page: quickopen.ai",
+                            kind="ghost",
+                            command=lambda: open_with_default_app(
+                                PROJECT_URL)).pack(anchor="w", pady=(6, 0))
 
         # ---- shutdown
         def _on_close(self):
@@ -1106,7 +939,8 @@ def build_app():
             self.destroy()
 
     # -----------------------------------------------------------------------
-    # Fullscreen translucent region-selection overlay
+    # Fullscreen translucent region-selection overlay (deliberately raw tk —
+    # it is a temporary borderless overlay, not themed chrome)
     # -----------------------------------------------------------------------
     class RegionOverlay(tk.Toplevel):
         """A borderless, translucent, fullscreen window to drag a rectangle.
@@ -1138,7 +972,7 @@ def build_app():
             self._canvas.create_text(
                 self.winfo_screenwidth() // 2, 40,
                 text="Drag to select a region · Esc to cancel",
-                fill="#ffffff", font=("Segoe UI", 14))
+                fill="#ffffff", font=aura.font(14))
             self._canvas.bind("<Button-1>", self._press)
             self._canvas.bind("<B1-Motion>", self._drag)
             self._canvas.bind("<ButtonRelease-1>", self._release)
@@ -1161,7 +995,7 @@ def build_app():
             x1 = e.x_root - self.winfo_rootx()
             y1 = e.y_root - self.winfo_rooty()
             self._rect = self._canvas.create_rectangle(
-                x0, y0, x1, y1, outline="#5b86f7", width=2)
+                x0, y0, x1, y1, outline=ACCENT, width=2)
 
         def _release(self, e):
             if not self._start:
@@ -1215,7 +1049,9 @@ def main():
     """Entry point: build the root window and run.  Degrades on headless hosts.
 
     Importing this module does nothing; only this function creates a Tk root.
-    With no display it prints a friendly note and returns 0 instead of raising.
+    With no display (e.g. a server), without Pillow's Tk bridge, or without
+    customtkinter installed, it prints a friendly note and returns 0 instead
+    of raising.
     """
     try:
         import tkinter as tk
@@ -1233,6 +1069,10 @@ def main():
     try:
         App = build_app()
         app = App()
+    except ImportError as exc:
+        print(f"{APP_NAME}: the GUI needs the 'customtkinter' package "
+              f"({exc}). Install it with:  pip install customtkinter")
+        return 0
     except tk.TclError as exc:
         print(f"{APP_NAME}: no graphical display available — cannot start the "
               f"GUI here ({exc}). This app is intended for the desktop.")

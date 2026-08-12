@@ -1,3 +1,5 @@
 # Screen Studio runtime deps — permissive/weak-copyleft only, no AGPL/proprietary.
 mss>=9.0
 Pillow>=10.4
+customtkinter>=5.2
+darkdetect>=0.8
