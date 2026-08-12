@@ -1,6 +1,6 @@
 ; Inno Setup — Screen Studio. Signed single-file installer, compiled in CI.
 #define AppName "Screen Studio"
-#define AppVersion "1.0.1"
+#define AppVersion "1.0.2"
 
 [Setup]
 AppMutex=QuickOpen.ScreenStudio
@@ -24,7 +24,7 @@ WizardSmallImageFile=branding\wizard-small.bmp
 AppCopyright=Apache-2.0. 100%% AI-built, published on QuickOpen (quickopen.ai).
 VersionInfoCompany=QuickOpen
 VersionInfoProductName=Screen Studio
-VersionInfoVersion=1.0.1.0
+VersionInfoVersion=1.0.2.0
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 ArchitecturesInstallIn64BitMode=x64compatible
