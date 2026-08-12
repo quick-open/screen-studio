@@ -1,0 +1,53 @@
+name: build-windows
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install deps
+        run: python -m pip install --upgrade pip -r requirements.txt pyinstaller pytest
+      - name: Run tests
+        run: python -m pytest -q
+      - name: Fetch LGPL ffmpeg
+        shell: pwsh
+        run: |
+          choco install ffmpeg --no-progress -y
+          $ff = (Get-Command ffmpeg.exe -ErrorAction SilentlyContinue).Source
+          if ($ff) { Copy-Item $ff ffmpeg_staged.exe -ErrorAction SilentlyContinue }
+      - name: Build ScreenStudio.exe
+        run: >
+          pyinstaller --onefile --windowed --name ScreenStudio
+          --icon screen-studio.ico
+          --version-file packaging/version.txt
+          --add-data "screen-studio.ico;."
+          --collect-all mss
+          --collect-submodules PIL
+          screen_studio_app.py
+      - name: Stage installer inputs
+        shell: pwsh
+        run: |
+          $stage = "packaging/staging"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item dist/ScreenStudio.exe $stage/
+          if (Test-Path ffmpeg_staged.exe) { Copy-Item ffmpeg_staged.exe $stage/ffmpeg.exe }
+          'FFmpeg is licensed under the LGPL/GPL. Source: https://ffmpeg.org . Redistributed unmodified.' | Out-File -Encoding utf8 $stage/ffmpeg-LICENSE.txt
+          Copy-Item quickopen-root.crt, README.md, LICENSE $stage/ -ErrorAction SilentlyContinue
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+      - name: Compile installer
+        run: '& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" packaging\installer.iss'
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: screen-studio-windows
+          path: |
+            dist/ScreenStudio.exe
+            packaging/dist/ScreenStudio-Setup.exe
+          if-no-files-found: error

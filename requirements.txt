@@ -1,0 +1,3 @@
+# Screen Studio runtime deps — permissive/weak-copyleft only, no AGPL/proprietary.
+mss>=9.0
+Pillow>=10.4
