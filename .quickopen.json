@@ -1,13 +1,14 @@
 {
   "slug": "screen-studio",
   "name": "Screen Studio",
-  "tagline": "Capture screenshots (region/window/full), annotate, and record your screen to MP4/GIF \u2014 offline.",
+  "tagline": "Capture screenshots (region/window/full), annotate, and record your screen to MP4/GIF — offline.",
   "categorySlug": "screen-recording",
   "license": "Apache-2.0",
   "description": "Capture the full screen, a chosen window, or a dragged region; annotate captures with arrows, boxes, text and highlights; and record your screen (with a region selector and adjustable FPS) to MP4 or animated GIF using a bundled FFmpeg. Copy to clipboard or save. Everything is local.",
   "aiStack": "Python (tkinter + CLI), mss, Pillow, FFmpeg (LGPL)",
   "platforms": [
-    "windows"
+    "windows",
+    "linux"
   ],
   "buildEntry": "screen_studio_app.py"
 }
