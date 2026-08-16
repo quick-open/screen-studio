@@ -35,7 +35,7 @@ import threading
 # fails.
 
 APP_NAME = "Screen Studio"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 WINDOW_TITLE = "Screen Studio — by QuickOpen (quickopen.ai)"
 PROJECT_URL = "https://quickopen.ai/projects/screen-studio"
 ACCENT = "#5b86f7"      # publish/specs/screen-studio.json accent
@@ -210,8 +210,8 @@ def build_app():
                 pass  # icon is cosmetic
 
         # ---- theming: raw canvas text must be re-tinted on theme flip
-        def set_theme(self, theme):
-            super().set_theme(theme)
+        def set_theme(self, theme, _system=False):
+            super().set_theme(theme, _system=_system)
             self._redraw_canvas()
 
         # ---- section switching (recent list refreshes on show)
@@ -220,19 +220,33 @@ def build_app():
             if sid == "recent":
                 self._reload_recent()
 
-        # ---- menu (native menus stay; theme lives in the sidebar toggle too)
+        # ---- menu (☰ dropdown) + keyboard baseline (§7/§9)
         def _build_menu(self):
             bar = tk.Menu(self)
             filem = tk.Menu(bar, tearoff=0)
+            filem.add_command(label="New capture (region)…",
+                              accelerator="Ctrl+N",
+                              command=self._capture_region)
             filem.add_command(label="Open image…", accelerator="Ctrl+O",
                               command=self._open_image)
             filem.add_command(label="Save annotated image…",
                               accelerator="Ctrl+S", command=self._save_edit)
             filem.add_separator()
+            filem.add_command(label="Settings…", accelerator="Ctrl+,",
+                              command=self._open_settings)
             filem.add_command(label="Exit", command=self._on_close)
             bar.add_cascade(label="File", menu=filem)
 
+            editm = tk.Menu(bar, tearoff=0)
+            editm.add_command(label="Undo annotation", accelerator="Ctrl+Z",
+                              command=self._undo)
+            editm.add_command(label="Copy annotated image",
+                              command=self._copy_edit)
+            bar.add_cascade(label="Edit", menu=editm)
+
             viewm = tk.Menu(bar, tearoff=0)
+            viewm.add_command(label="Toggle sidebar", accelerator="Ctrl+\\",
+                              command=self.toggle_sidebar)
             viewm.add_command(
                 label="Toggle dark mode",
                 command=lambda: self.set_theme(
@@ -245,8 +259,47 @@ def build_app():
                               command=lambda: open_with_default_app(PROJECT_URL))
             bar.add_cascade(label="Help", menu=helpm)
             self.configure(menu=bar)
+            self.bind_all("<Control-n>", lambda e: self._capture_region())
             self.bind_all("<Control-o>", lambda e: self._open_image())
             self.bind_all("<Control-s>", lambda e: self._save_edit())
+            self.bind_all("<Control-z>", lambda e: self._undo())
+            self.bind_all("<Control-comma>",
+                          lambda e: (self._open_settings(), "break")[1])
+            self.bind_all("<F5>", lambda e: self._reload_recent())
+
+        # ---- Settings dialog (Ctrl+,)
+        def _open_settings(self):
+            dlg = aura.Dialog(self, title="Settings", size=(460, 260))
+            aura.SectionLabel(dlg.body, "Appearance").pack(anchor="w",
+                                                           pady=(0, 2))
+            trow = ctk.CTkFrame(dlg.body, fg_color="transparent")
+            trow.pack(anchor="w", pady=(4, 0))
+            aura.Caption(trow, "Theme").pack(side="left", padx=(0, 10))
+            cur = guiconfig.get_theme()
+            th = aura.AuraOption(trow, values=["System", "Light", "Dark"],
+                                 width=110, height=30,
+                                 command=self._set_theme_pref)
+            th.set(cur.capitalize() if cur in ("light", "dark") else "System")
+            th.pack(side="left")
+            aura.Caption(dlg.body,
+                         "System follows the OS Aura Dark/Light live.").pack(
+                anchor="w", pady=(6, 0))
+            aura.Caption(dlg.body,
+                         "Captures and recordings stay on this device — "
+                         "nothing is ever uploaded.").pack(
+                anchor="w", pady=(14, 0))
+            dlg.add_button("Close")
+
+        def _set_theme_pref(self, choice):
+            pref = str(choice).lower()
+            if pref == "system":
+                guiconfig.set_theme("system")
+                self._follow_system = True
+                if getattr(self, "_sys_listener", None) is None:
+                    self._start_system_listener()
+                self.set_theme(aura._system_theme(), _system=True)
+            elif pref in ("light", "dark"):
+                self.set_theme(pref)     # persists via on_theme_change
 
         # ---- background op runner (threading + self.after marshalling)
         def _bg(self, work, on_ok, button=None, busy="Working…"):
@@ -318,26 +371,19 @@ def build_app():
         # CAPTURE
         # =====================================================================
         def _build_capture(self, frame):
-            aura.Caption(frame, SECTION_DESCRIPTIONS["capture"],
+            tb = aura.Toolbar(frame)
+            tb.pack(fill="x", pady=(0, 10))
+            tb.add_button("＋ Capture region", self._capture_region,
+                          kind="primary")
+            tb.add_button("Full screen", self._capture_full)
+            tb.add_button("Window (best-effort)", self._capture_window)
+
+            aura.Caption(frame,
+                         "Region opens a translucent full-screen overlay — "
+                         "drag a rectangle to grab it (Ctrl+N). Every "
+                         "capture opens in Annotate.",
                          wraplength=760, justify="left").pack(
                 anchor="w", pady=(0, 12))
-
-            shot = aura.Card(frame, title="Take a screenshot")
-            shot.pack(fill="x")
-            btns = ctk.CTkFrame(shot.body, fg_color="transparent")
-            btns.pack(fill="x")
-            aura.AuraButton(btns, "Full screen",
-                            command=self._capture_full).pack(side="left")
-            aura.AuraButton(btns, "Window (best-effort)", kind="secondary",
-                            command=self._capture_window).pack(
-                side="left", padx=8)
-            aura.AuraButton(btns, "Region…", kind="secondary",
-                            command=self._capture_region).pack(side="left")
-            aura.Caption(shot.body,
-                         "Region opens a translucent full-screen overlay — "
-                         "drag a rectangle to grab it. Every capture opens "
-                         "in Annotate.", wraplength=720, justify="left").pack(
-                anchor="w", pady=(10, 0))
 
             mon = aura.Card(frame, title="Capture one monitor")
             mon.pack(fill="x", pady=(14, 0))
@@ -430,6 +476,20 @@ def build_app():
         # ANNOTATE
         # =====================================================================
         def _build_annotate(self, frame):
+            tb = aura.Toolbar(frame)
+            tb.pack(fill="x", pady=(0, 10))
+            tb.add_button("＋ New capture", self._capture_region,
+                          kind="primary")
+            tb.add_button("Open…", self._open_image)
+            tb.add_separator()
+            tb.add_button("Undo", self._undo, kind="ghost")
+            save_btn = aura.AuraButton(tb, "Save…", kind="secondary",
+                                       height=32, command=self._save_edit)
+            tb.add_right(save_btn)
+            copy_btn = aura.AuraButton(tb, "Copy", kind="ghost",
+                                       height=32, command=self._copy_edit)
+            tb.add_right(copy_btn)
+
             self._tool_var = tk.StringVar(value="arrow")
             self._tool_seg = aura.SegmentedControl(
                 frame, values=[label for _tid, label in EDITOR_TOOLS],
@@ -465,19 +525,8 @@ def build_app():
             ttk.Spinbox(opts, from_=1, to=999, width=4,
                         textvariable=self._num_var).pack(side="left")
 
-            actions = ctk.CTkFrame(frame, fg_color="transparent")
-            actions.pack(fill="x", pady=(4, 10))
-            aura.AuraButton(actions, "Undo", kind="secondary",
-                            command=self._undo).pack(side="left")
-            aura.AuraButton(actions, "Open image…", kind="secondary",
-                            command=self._open_image).pack(side="left", padx=8)
-            aura.AuraButton(actions, "Save…",
-                            command=self._save_edit).pack(side="left")
-            aura.AuraButton(actions, "Copy", kind="secondary",
-                            command=self._copy_edit).pack(side="left", padx=8)
-
             body = ctk.CTkFrame(frame, fg_color="transparent")
-            body.pack(fill="both", expand=True)
+            body.pack(fill="both", expand=True, pady=(8, 0))
             self._canvas = tk.Canvas(body, bd=0)
             self._canvas.pack(fill="both", expand=True)
             aura.track(self._canvas, "canvas")
@@ -485,6 +534,13 @@ def build_app():
             self._canvas.bind("<B1-Motion>", self._on_canvas_drag)
             self._canvas.bind("<ButtonRelease-1>", self._on_canvas_release)
             self._canvas.bind("<Configure>", lambda e: self._redraw_canvas())
+            self._empty_annotate = aura.EmptyState(
+                body, title="No image yet",
+                caption="Capture the screen or open an image — every "
+                        "capture lands here, ready to annotate.",
+                action_text="＋ New capture", action=self._capture_region,
+                image=(asset_path("assets/annotate-empty-light.png"),
+                       asset_path("assets/annotate-empty-dark.png")))
             self._set_tool("arrow")
 
         def _set_tool(self, tid):
@@ -511,15 +567,14 @@ def build_app():
             except Exception:
                 return
             canvas.delete("all")
+            empty = getattr(self, "_empty_annotate", None)
             if self._edit_image is None:
-                canvas.create_text(
-                    canvas.winfo_width() // 2 or 200,
-                    canvas.winfo_height() // 2 or 120,
-                    text="No image yet — capture from the Capture section\n"
-                         "or open an image (Ctrl+O).",
-                    fill=aura.P("muted"), justify="center",
-                    font=aura.font(11))
+                if empty is not None:
+                    empty.place(x=0, y=0, relwidth=1, relheight=1)
+                    empty.lift()
                 return
+            if empty is not None:
+                empty.place_forget()
             cw = max(50, canvas.winfo_width())
             ch = max(50, canvas.winfo_height())
             iw, ih = self._edit_image.size
@@ -673,11 +728,23 @@ def build_app():
         # RECORD
         # =====================================================================
         def _build_record(self, frame):
+            tb = aura.Toolbar(frame)
+            tb.pack(fill="x", pady=(0, 10))
+            self._rec_start_btn = tb.add_button("◉ Start recording",
+                                                self._rec_start,
+                                                kind="primary")
+            self._rec_stop_btn = tb.add_button("Stop", self._rec_stop)
+            self._rec_stop_btn.state(["disabled"])
+            # live recording indicator: danger token, flips with the theme
+            self._rec_elapsed = ctk.CTkLabel(
+                tb, text="", font=aura.font(15, "bold"), text_color=DANGER)
+            tb.add(self._rec_elapsed)
+
             aura.Caption(frame, SECTION_DESCRIPTIONS["record"],
                          wraplength=760, justify="left").pack(
                 anchor="w", pady=(0, 12))
 
-            card = aura.Card(frame, title="Screen recording")
+            card = aura.Card(frame, title="Recording options")
             card.pack(fill="x")
 
             row = ctk.CTkFrame(card.body, fg_color="transparent")
@@ -708,20 +775,6 @@ def build_app():
             self._fmt_var = tk.StringVar(value="MP4")
             aura.AuraCombo(row2, variable=self._fmt_var, state="readonly",
                            width=90, values=["MP4", "GIF"]).pack(side="left")
-
-            row3 = ctk.CTkFrame(card.body, fg_color="transparent")
-            row3.pack(fill="x")
-            self._rec_start_btn = aura.AuraButton(
-                row3, "● Start recording", command=self._rec_start)
-            self._rec_start_btn.pack(side="left")
-            self._rec_stop_btn = aura.AuraButton(
-                row3, "Stop", kind="danger", command=self._rec_stop)
-            self._rec_stop_btn.pack(side="left", padx=8)
-            self._rec_stop_btn.state(["disabled"])
-            # live recording indicator: danger token, flips with the theme
-            self._rec_elapsed = ctk.CTkLabel(
-                row3, text="", font=aura.font(15, "bold"), text_color=DANGER)
-            self._rec_elapsed.pack(side="left", padx=12)
 
             note = ("Live recording shells out to FFmpeg (gdigrab on "
                     "Windows). Stop finalises the file. On non-Windows "

@@ -1,6 +1,7 @@
 r"""Tiny JSON-backed config for the Screen Studio GUI.
 
-Stores just the chosen theme ("light"/"dark") and a short list of recent output
+Stores the theme preference ("system" follows the OS Aura Dark/Light live;
+"light"/"dark" are explicit overrides) and a short list of recent output
 files, and never raises: a corrupt or unreadable config must never stop the app
 from starting.  On Windows the file lives at
 ``%LOCALAPPDATA%\ScreenStudio\config.json``; elsewhere it falls back to
@@ -15,11 +16,18 @@ import os
 APP_DIRNAME = "ScreenStudio"
 CONFIG_NAME = "config.json"
 MAX_RECENT = 12
-VALID_THEMES = ("light", "dark")
+VALID_THEMES = ("system", "light", "dark")
 
 
 def config_dir():
-    r"""``%LOCALAPPDATA%\ScreenStudio`` on Windows, ``~/.screenstudio`` else."""
+    r"""``%LOCALAPPDATA%\ScreenStudio`` on Windows, ``~/.screenstudio`` else.
+
+    Honours ``SCREENSTUDIO_HOME`` when set so tests can redirect everything
+    to a tmp dir.
+    """
+    override = os.environ.get("SCREENSTUDIO_HOME")
+    if override:
+        return override
     local = os.environ.get("LOCALAPPDATA")
     if local and os.name == "nt":
         return os.path.join(local, APP_DIRNAME)
@@ -31,7 +39,7 @@ def config_path():
 
 
 def _defaults():
-    return {"theme": "dark", "recent": []}
+    return {"theme": "system", "recent": []}
 
 
 def load():
@@ -56,7 +64,7 @@ def save(cfg):
     try:
         os.makedirs(config_dir(), exist_ok=True)
         clean = {
-            "theme": cfg.get("theme") if cfg.get("theme") in VALID_THEMES else "dark",
+            "theme": cfg.get("theme") if cfg.get("theme") in VALID_THEMES else "system",
             "recent": [p for p in cfg.get("recent", []) if isinstance(p, str)][:MAX_RECENT],
         }
         tmp = config_path() + ".tmp"
@@ -68,7 +76,7 @@ def save(cfg):
 
 
 def get_theme():
-    return load().get("theme", "dark")
+    return load().get("theme", "system")
 
 
 def set_theme(theme):
