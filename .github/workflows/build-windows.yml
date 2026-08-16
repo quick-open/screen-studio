@@ -30,6 +30,7 @@ jobs:
           --add-data "screen-studio.ico;."
           --collect-all mss
           --collect-all customtkinter
+          --add-data "assets;assets"
           --collect-submodules PIL
           screen_studio_app.py
       - name: Stage installer inputs
