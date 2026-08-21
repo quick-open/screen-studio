@@ -1,6 +1,6 @@
 ; Inno Setup — Screen Studio. Signed single-file installer, compiled in CI.
 #define AppName "Screen Studio"
-#define AppVersion "1.1.0"
+#define AppVersion "1.1.1"
 
 [Setup]
 AppMutex=QuickOpen.ScreenStudio
@@ -42,7 +42,7 @@ WizardSmallImageFile=branding\wizard-small.bmp
 AppCopyright=Apache-2.0. 100%% AI-built, published on QuickOpen (quickopen.ai).
 VersionInfoCompany=QuickOpen
 VersionInfoProductName=Screen Studio
-VersionInfoVersion=1.1.0.0
+VersionInfoVersion=1.1.1.0
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 ArchitecturesInstallIn64BitMode=x64compatible
@@ -60,7 +60,10 @@ Name: "trustca"; Description: "Trust the QuickOpen Root CA (lets Windows verify 
 
 [Files]
 Source: "staging\ScreenStudio.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "staging\ffmpeg.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+; ffmpeg is REQUIRED, so no skipifsourcedoesntexist: that flag is how a
+; broken staging step shipped silently before. If the pinned download did not
+; land, fail the compile rather than ship a recorder that cannot record.
+Source: "staging\ffmpeg.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "staging\ffmpeg-LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "staging\quickopen-root.crt"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "staging\README.md"; DestDir: "{app}"; Flags: ignoreversion isreadme skipifsourcedoesntexist
