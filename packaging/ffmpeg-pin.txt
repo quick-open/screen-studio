@@ -13,9 +13,9 @@
 # GPL, DELIBERATELY: this app encodes with libx264/libx265, which are GPL, so
 # the LGPL build will not do. Shipping GPL binaries carries a source-availability
 # obligation - see ffmpeg-LICENSE.txt, staged next to the binaries.
-build=BtbN/FFmpeg-Builds autobuild-2026-08-21-13-40
-version=n9.0.1-6-g9d4ca21220
-url=https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-08-21-13-40/ffmpeg-n9.0.1-6-g9d4ca21220-win64-gpl-9.0.zip
-sha256=6c0a3c1256cba57c62a3bb012c1e8f5e794d38a16c6509d05349237d2b66340f
+build=BtbN/FFmpeg-Builds autobuild-2026-11-16-15-29 (mirrored on r2.quickopen.io: BtbN deletes old autobuilds)
+version=n9.0.2-57-gd838f9f9ae
+url=https://r2.quickopen.io/thirdparty/ffmpeg/ffmpeg-n9.0.2-57-gd838f9f9ae-win64-gpl-9.0.zip
+sha256=031fb35d61d7e0f43942d1fba07dace915659b5687a4235749f56d99b40b6247
 # Which tools to stage out of bin/. ffplay is deliberately NOT shipped.
 tools=ffmpeg.exe
